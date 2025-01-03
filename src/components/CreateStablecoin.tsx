@@ -192,63 +192,122 @@ export const CreateStablecoin = () => {
     try {
       setLoading(true);
 
-      // Debug wallet state
-      console.log('Wallet state:', {
-        connected: wallet.connected,
-        publicKey: publicKey.toString(),
-        rpcEndpoint: connection.rpcEndpoint
+      // Debug: Check bond mint account first
+      const bondMintPubkey = new PublicKey(formData.bondMint);
+      const bondMintInfo = await connection.getAccountInfo(bondMintPubkey);
+      
+      // Add more detailed logging
+      console.log('Bond Mint Info:', {
+        exists: !!bondMintInfo,
+        owner: bondMintInfo?.owner.toString(),
+        data: bondMintInfo?.data.length,
+        bondMint: bondMintPubkey.toString()
       });
 
-      // Create transaction
-      const transaction = new Transaction();
+      // Check if account exists and is owned by the expected program
+      const EXPECTED_BOND_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+      
+      if (!bondMintInfo) {
+        toast.error('Bond mint account not found');
+        return;
+      }
 
-      // Add create stablecoin instruction
+      if (bondMintInfo.owner.toString() !== EXPECTED_BOND_PROGRAM_ID) {
+        console.error('Invalid bond mint owner:', {
+          expected: EXPECTED_BOND_PROGRAM_ID,
+          actual: bondMintInfo.owner.toString()
+        });
+        toast.error('Invalid bond mint account owner');
+        return;
+      }
+
+      // Create stablecoin data account
+      const stablecoinData = Keypair.generate();
+      const stablecoinDataRent = await connection.getMinimumBalanceForRentExemption(82); // Adjust size as needed
+
+      // Create stablecoin mint
+      const stablecoinMint = Keypair.generate();
+      const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
+
+      // Get latest blockhash
+      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+
+      // Create transaction
+      const transaction = new Transaction({
+        feePayer: publicKey,
+        recentBlockhash: latestBlockhash.blockhash
+      });
+
+      // 1. Create stablecoin data account
+      transaction.add(
+        SystemProgram.createAccount({
+          fromPubkey: publicKey,
+          newAccountPubkey: stablecoinData.publicKey,
+          space: 82, // Adjust size based on your program's needs
+          lamports: stablecoinDataRent,
+          programId: program.programId
+        })
+      );
+
+      // 2. Create stablecoin mint account
+      transaction.add(
+        SystemProgram.createAccount({
+          fromPubkey: publicKey,
+          newAccountPubkey: stablecoinMint.publicKey,
+          space: MINT_SIZE,
+          lamports: mintRent,
+          programId: TOKEN_PROGRAM_ID
+        })
+      );
+
+      // 3. Initialize stablecoin mint
+      transaction.add(
+        createInitializeMintInstruction(
+          stablecoinMint.publicKey,
+          6, // decimals
+          publicKey, // mint authority
+          publicKey  // freeze authority
+        )
+      );
+
+      // 4. Add create stablecoin instruction
       const createStablecoinIx = await program.methods
         .createStablecoin(
           formData.name,
           formData.symbol,
-          6, // decimals
+          6,
           formData.icon,
           formData.currency
         )
         .accounts({
           authority: publicKey,
-          stablecoinData: publicKey,
-          stablecoinMint: publicKey,
-          bondMint: new PublicKey(formData.bondMint),
+          stablecoinData: stablecoinData.publicKey,
+          stablecoinMint: stablecoinMint.publicKey,
+          bondMint: bondMintPubkey,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           rent: SYSVAR_RENT_PUBKEY,
         })
         .instruction();
 
-      // Get latest blockhash with retry
-      let latestBlockhash;
-      try {
-        latestBlockhash = await connection.getLatestBlockhash('confirmed');
-        console.log('Blockhash obtained:', latestBlockhash.blockhash);
-      } catch (bhError) {
-        console.error('Failed to get blockhash:', bhError);
-        toast.error('Network error. Please try again.');
-        return;
-      }
-
-      // Setup transaction
       transaction.add(createStablecoinIx);
-      transaction.recentBlockhash = latestBlockhash.blockhash;
-      transaction.feePayer = publicKey;
 
-      // Debug transaction
       console.log('Transaction setup:', {
-        feePayer: transaction.feePayer?.toString(),
-        recentBlockhash: transaction.recentBlockhash,
+        feePayer: publicKey.toString(),
+        stablecoinData: stablecoinData.publicKey.toString(),
+        stablecoinMint: stablecoinMint.publicKey.toString(),
+        bondMint: bondMintPubkey.toString(),
         instructions: transaction.instructions.length
       });
 
-      // Try to simulate the transaction first
+      // Try simulation first
       try {
         const simulation = await connection.simulateTransaction(transaction);
-        console.log('Simulation result:', simulation);
+        console.log('Simulation result:', {
+          err: simulation.value.err,
+          logs: simulation.value.logs,
+          unitsConsumed: simulation.value.unitsConsumed
+        });
 
         if (simulation.value.err) {
           throw new Error(`Simulation failed: ${JSON.stringify(simulation.value.err)}`);
@@ -259,46 +318,26 @@ export const CreateStablecoin = () => {
         return;
       }
 
-      // Send transaction with retries
-      let signature: string | undefined;
-      let retries = 3;
-      
-      while (retries > 0 && !signature) {
-        try {
-          signature = await wallet.sendTransaction(transaction, connection, {
-            preflightCommitment: 'processed',
-            maxRetries: 3
-          });
-          
-          console.log('Transaction sent:', signature);
+      // Send transaction
+      const signature = await wallet.sendTransaction(transaction, connection, {
+        signers: [stablecoinData, stablecoinMint],
+        preflightCommitment: 'confirmed'
+      });
 
-          // Wait for confirmation
-          const confirmation = await connection.confirmTransaction({
-            signature,
-            blockhash: latestBlockhash.blockhash,
-            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-          }, 'confirmed');
+      console.log('Transaction sent:', signature);
 
-          if (confirmation.value.err) {
-            throw new Error(`Transaction failed: ${confirmation.value.err.toString()}`);
-          }
+      // Wait for confirmation
+      const confirmation = await connection.confirmTransaction({
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+      }, 'confirmed');
 
-          toast.success(`Stablecoin created successfully! Signature: ${signature}`);
-          break;
-
-        } catch (txError: any) {
-          console.error(`Transaction attempt ${4 - retries} failed:`, txError);
-          retries--;
-          
-          if (retries === 0) {
-            toast.error(txError.message || 'Transaction failed after multiple attempts');
-            return;
-          }
-          
-          // Wait before retrying
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
+      if (confirmation.value.err) {
+        throw new Error(`Transaction failed: ${confirmation.value.err.toString()}`);
       }
+
+      toast.success(`Stablecoin created successfully! Signature: ${signature}`);
 
     } catch (error: any) {
       console.error('Detailed error:', {
