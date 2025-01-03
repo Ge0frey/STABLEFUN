@@ -4,9 +4,15 @@ import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import '@solana/wallet-adapter-react-ui/styles.css';
 import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-wallets';
+import { Commitment } from '@solana/web3.js';
 
 const network = WalletAdapterNetwork.Devnet;
-const endpoint = 'https://api.devnet.solana.com';
+const endpoint = process.env.VITE_RPC_ENDPOINT || 'https://api.devnet.solana.com';
+const config = {
+  commitment: 'confirmed' as Commitment,
+  confirmTransactionInitialTimeout: 60000, // 60 seconds
+  wsEndpoint: endpoint.replace('https://', 'wss://'),
+};
 
 export const WalletContextProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const wallets = useMemo(
