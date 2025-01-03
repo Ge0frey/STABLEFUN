@@ -159,36 +159,62 @@ export const CreateStablecoin = () => {
       const stablecoinMint = Keypair.generate();
       const stablecoinData = Keypair.generate();
 
-      console.log('Generated keypairs:', {
-        stablecoinMint: stablecoinMint.publicKey.toString(),
-        stablecoinData: stablecoinData.publicKey.toString()
-      });
-
+      // Initialize StablecoinProgram first
       const stablecoinProgram = new StablecoinProgram(connection, wallet);
 
-      const transaction = new Transaction();
+      // Calculate account sizes and rent
+      const mintSpace = 82; // Token mint size
+      const dataSpace = 8 + // Discriminator
+        32 + // Authority
+        32 + // Stablecoin mint
+        32 + // Bond mint
+        8 + // Total supply
+        1 + // Decimals
+        4 + Buffer.from(formData.name).length + // Name length prefix + data
+        4 + Buffer.from(formData.symbol).length + // Symbol length prefix + data
+        4 + Buffer.from(formData.icon).length + // Icon URL length prefix + data
+        4 + Buffer.from(formData.currency).length; // Currency length prefix + data
 
-      // Calculate proper space and rent
-      const mintRent = await getMinimumBalanceForRentExemptMint(connection);
-      const dataSpace = 215; // Use the exact space shown in your logs
+      const mintRent = await connection.getMinimumBalanceForRentExemption(mintSpace);
       const dataRent = await connection.getMinimumBalanceForRentExemption(dataSpace);
 
-      // Add account creation instructions
+      console.log('Account setup:', {
+        mintSpace,
+        dataSpace,
+        mintRent: mintRent.toString(),
+        dataRent: dataRent.toString(),
+        name: formData.name,
+        symbol: formData.symbol,
+        bondMint: formData.bondMint
+      });
+
+      // Create transaction
+      const transaction = new Transaction();
+
+      // 1. Create mint account
       transaction.add(
         SystemProgram.createAccount({
           fromPubkey: publicKey,
           newAccountPubkey: stablecoinMint.publicKey,
-          space: MINT_SIZE,
+          space: mintSpace,
           lamports: mintRent,
           programId: TOKEN_PROGRAM_ID,
-        }),
+        })
+      );
+
+      // 2. Initialize mint
+      transaction.add(
         createInitializeMintInstruction(
           stablecoinMint.publicKey,
-          6,
-          publicKey,
-          publicKey,
+          6, // decimals
+          publicKey, // mint authority
+          publicKey, // freeze authority
           TOKEN_PROGRAM_ID
-        ),
+        )
+      );
+
+      // 3. Create data account with proper space
+      transaction.add(
         SystemProgram.createAccount({
           fromPubkey: publicKey,
           newAccountPubkey: stablecoinData.publicKey,
@@ -198,7 +224,7 @@ export const CreateStablecoin = () => {
         })
       );
 
-      // Add create stablecoin instruction
+      // 4. Create stablecoin instruction
       const createStablecoinIx = await stablecoinProgram.program.methods
         .createStablecoin(
           formData.name,
@@ -225,36 +251,32 @@ export const CreateStablecoin = () => {
       transaction.recentBlockhash = latestBlockhash.blockhash;
       transaction.feePayer = publicKey;
 
-      // Sign with all required signers
-      transaction.sign(stablecoinMint, stablecoinData);
-      
-      console.log('Sending transaction with signers:', {
-        feePayer: publicKey.toString(),
+      console.log('Sending transaction with accounts:', {
+        authority: publicKey.toString(),
+        stablecoinData: stablecoinData.publicKey.toString(),
         stablecoinMint: stablecoinMint.publicKey.toString(),
-        stablecoinData: stablecoinData.publicKey.toString()
+        bondMint: formData.bondMint
       });
 
-      // Send and confirm transaction
+      // Send transaction
       const signed = await wallet.sendTransaction(transaction, connection, {
         signers: [stablecoinMint, stablecoinData],
         preflightCommitment: 'confirmed',
-        maxRetries: 5
       });
 
       console.log('Transaction sent:', signed);
 
       // Wait for confirmation
       const confirmation = await connection.confirmTransaction({
+        signature: signed,
         blockhash: latestBlockhash.blockhash,
         lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        signature: signed
       }, 'confirmed');
 
       if (confirmation.value.err) {
         throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
 
-      console.log('Transaction confirmed:', confirmation);
       toast.success('Stablecoin created successfully!');
 
     } catch (err: unknown) {
