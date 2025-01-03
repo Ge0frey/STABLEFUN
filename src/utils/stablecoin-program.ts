@@ -1,11 +1,22 @@
 import { Connection, PublicKey, Transaction, Keypair } from '@solana/web3.js';
 import { Program, AnchorProvider, web3, BN } from '@project-serum/anchor';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { 
+  TOKEN_PROGRAM_ID, 
+  getAccount as getTokenAccount,
+  getMint as getTokenMint
+} from '@solana/spl-token';
 import { IDL } from './idl/stablecoin_factory';
 import { SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { WalletContextState } from '@solana/wallet-adapter-react';
 
-// Update this to use your deployed program ID
-const PROGRAM_ID = new PublicKey("CGnwq4D9qErCRjPujz5MVkMaixR8BLRACpAmLWsqoRRe");
+// Custom error type
+interface StablecoinError extends Error {
+  code?: string | number;
+  msg?: string;
+}
+
+// Export the program ID
+export const PROGRAM_ID = new PublicKey("CGnwq4D9qErCRjPujz5MVkMaixR8BLRACpAmLWsqoRRe");
 
 interface CreateStablecoinParams {
   name: string;
@@ -23,132 +34,95 @@ interface WalletAdapter {
   sendTransaction: (transaction: Transaction, connection: Connection) => Promise<string>;
 }
 
+// Create a custom type that matches what Anchor expects
+type AnchorWallet = {
+  publicKey: PublicKey;
+  signTransaction(tx: Transaction): Promise<Transaction>;
+  signAllTransactions(txs: Transaction[]): Promise<Transaction[]>;
+};
+
 export class StablecoinProgram {
-  private program: Program;
+  public program: Program<typeof IDL>;
   private connection: Connection;
-  private wallet: {
-    publicKey: PublicKey;
-    sendTransaction: (transaction: Transaction, connection: Connection) => Promise<string>;
-  };
+  private anchorWallet: AnchorWallet;
   public programId: PublicKey = PROGRAM_ID;
-  
+
   constructor(
     connection: Connection,
-    wallet: {
-      publicKey: PublicKey;
-      sendTransaction: (transaction: Transaction, connection: Connection) => Promise<string>;
-    }
+    wallet: WalletContextState
   ) {
+    if (!wallet.publicKey) {
+      throw new Error('Wallet not connected');
+    }
+
     this.connection = connection;
-    this.wallet = wallet;
+
+    // Create an adapter that matches what Anchor expects
+    this.anchorWallet = {
+      publicKey: wallet.publicKey,
+      signTransaction: wallet.signTransaction!,
+      signAllTransactions: wallet.signAllTransactions!,
+    };
 
     const provider = new AnchorProvider(
-      connection,
-      {
-        publicKey: wallet.publicKey,
-        signTransaction: async (tx: Transaction) => tx,
-        signAllTransactions: async (txs: Transaction[]) => txs,
-      },
+      this.connection,
+      this.anchorWallet,
       { commitment: 'confirmed' }
     );
 
     this.program = new Program(IDL, PROGRAM_ID, provider);
   }
 
-  async createStablecoin(params: CreateStablecoinParams) {
-    try {
-      const tx = await this.program.methods
-        .createStablecoin(
-          params.name,
-          params.symbol,
-          params.decimals,
-          params.iconUrl,
-          params.targetCurrency
-        )
-        .accounts({
-          authority: this.wallet.publicKey,
-          stablecoinData: params.stablecoinData.publicKey,
-          stablecoinMint: params.stablecoinMint.publicKey,
-          bondMint: params.bondMint,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
-        })
-        .signers([params.stablecoinData, params.stablecoinMint])
-        .rpc();
-
-      await this.connection.confirmTransaction(tx);
-      return tx;
-    } catch (error) {
-      console.error('Error in createStablecoin:', error);
-      throw error;
-    }
-  }
-
-  async mintTokens(params: {
-    amount: number;
+  async createStablecoin(params: {
+    name: string;
+    symbol: string;
+    decimals: number;
+    iconUrl: string;
+    targetCurrency: string;
     authority: PublicKey;
     stablecoinData: PublicKey;
     stablecoinMint: PublicKey;
-    userBondAccount: PublicKey;
-    programBondAccount: PublicKey;
-    userTokenAccount: PublicKey;
-    oracleFeed: PublicKey;
+    bondMint: PublicKey;
   }) {
-    try {
-      const tx = await this.program.methods
-        .mintTokens(new BN(params.amount))
-        .accounts({
-          authority: params.authority,
-          stablecoinData: params.stablecoinData,
-          stablecoinMint: params.stablecoinMint,
-          userBondAccount: params.userBondAccount,
-          programBondAccount: params.programBondAccount,
-          userTokenAccount: params.userTokenAccount,
-          oracleFeed: params.oracleFeed,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .transaction();
+    return this.program.methods
+      .createStablecoin(
+        params.name,
+        params.symbol,
+        params.decimals,
+        params.iconUrl,
+        params.targetCurrency
+      )
+      .accounts({
+        authority: params.authority,
+        stablecoinData: params.stablecoinData,
+        stablecoinMint: params.stablecoinMint,
+        bondMint: params.bondMint,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: SYSVAR_RENT_PUBKEY,
+      })
+      .instruction();
+  }
 
-      const signature = await this.wallet.sendTransaction(tx, this.connection);
-      await this.connection.confirmTransaction(signature);
+  async sendTransaction(transaction: Transaction): Promise<string> {
+    try {
+      const latestBlockhash = await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = latestBlockhash.blockhash;
+      transaction.feePayer = this.anchorWallet.publicKey;
+
+      const signed = await this.anchorWallet.signTransaction(transaction);
+      const signature = await this.connection.sendRawTransaction(signed.serialize());
+
+      await this.connection.confirmTransaction({
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        signature,
+      });
+
       return signature;
-    } catch (error) {
-      console.error('Error minting tokens:', error);
-      throw error;
-    }
-  }
-
-  async redeemTokens(params: {
-    amount: number;
-    authority: PublicKey;
-    stablecoinData: PublicKey;
-    stablecoinMint: PublicKey;
-    userBondAccount: PublicKey;
-    programBondAccount: PublicKey;
-    userTokenAccount: PublicKey;
-    oracleFeed: PublicKey;
-  }) {
-    try {
-      const tx = await this.program.methods
-        .redeemTokens(new BN(params.amount))
-        .accounts({
-          authority: params.authority,
-          stablecoinData: params.stablecoinData,
-          stablecoinMint: params.stablecoinMint,
-          userBondAccount: params.userBondAccount,
-          programBondAccount: params.programBondAccount,
-          userTokenAccount: params.userTokenAccount,
-          oracleFeed: params.oracleFeed,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
-
-      await this.connection.confirmTransaction(tx);
-      return tx;
-    } catch (error) {
-      console.error('Error redeeming tokens:', error);
-      throw error;
+    } catch (err) {
+      console.error('Transaction failed:', err);
+      throw err;
     }
   }
 } 
