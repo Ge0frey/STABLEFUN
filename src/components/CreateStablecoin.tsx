@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useWallet, WalletContextState } from '@solana/wallet-adapter-react';
 import { Upload } from 'lucide-react';
 import { toast } from 'react-hot-toast';
@@ -21,6 +21,8 @@ import {
 } from '@solana/spl-token';
 import { StablecoinProgram, PROGRAM_ID } from '../utils/stablecoin-program';
 import { getErrorMessage } from '../utils/errors';
+import { AnchorProvider, Program } from '@project-serum/anchor';
+import { IDL } from '../utils/idl/stablecoin_factory';
 
 interface StablebondType {
   mint: {
@@ -67,6 +69,19 @@ export const CreateStablecoin = () => {
     bondMint: ''
   });
   const [bondBalance, setBondBalance] = useState<number | null>(null);
+
+  // Initialize the program
+  const program = useMemo(() => {
+    if (!connection || !publicKey) return null;
+    
+    const provider = new AnchorProvider(
+      connection,
+      wallet as any,
+      { commitment: 'confirmed' }
+    );
+    
+    return new Program(IDL, PROGRAM_ID, provider);
+  }, [connection, wallet, publicKey]);
 
   useEffect(() => {
     const fetchBonds = async () => {
@@ -167,7 +182,7 @@ export const CreateStablecoin = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!publicKey || !isWalletReadyForTransaction(wallet) || !connection) {
+    if (!publicKey || !wallet || !connection || !program) {
       toast.error('Please connect your wallet first');
       return;
     }
@@ -175,124 +190,102 @@ export const CreateStablecoin = () => {
     try {
       setLoading(true);
 
-      // Now TypeScript knows wallet.wallet is defined
-      console.log('Wallet state:', {
-        connected: wallet.connected,
-        publicKey: publicKey.toString(),
-        walletName: wallet.wallet.adapter.name
-      });
+      // Verify bond mint account
+      const bondMintPubkey = new PublicKey(formData.bondMint);
+      const bondMintAccount = await connection.getAccountInfo(bondMintPubkey);
+      
+      if (!bondMintAccount) {
+        toast.error('Invalid bond mint account');
+        return;
+      }
 
+      if (!bondMintAccount.owner.equals(TOKEN_PROGRAM_ID)) {
+        toast.error('Bond mint must be an SPL token');
+        return;
+      }
+
+      // Create new mint for stablecoin
       const stablecoinMint = Keypair.generate();
-      const stablecoinData = Keypair.generate();
-      const stablecoinProgram = new StablecoinProgram(connection, wallet);
+      
+      // Get rent-exempt amount for mint
+      const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
-      // Calculate and log account sizes and rent
-      const mintSpace = MINT_SIZE;
-      const dataSpace = 8 + // Discriminator
-        32 + // Authority
-        32 + // Bond mint
-        8 +  // Total supply
-        1 +  // Decimals
-        4 + Buffer.from(formData.name).length +
-        4 + Buffer.from(formData.symbol).length +
-        4 + Buffer.from(formData.icon).length +
-        4 + Buffer.from(formData.currency).length;
-
-      const mintRent = await connection.getMinimumBalanceForRentExemption(mintSpace);
-      const dataRent = await connection.getMinimumBalanceForRentExemption(dataSpace);
-
-      console.log('Transaction setup:', {
-        mintSpace,
-        dataSpace,
-        mintRent: mintRent.toString(),
-        dataRent: dataRent.toString(),
-        bondMint: formData.bondMint
-      });
+      // Get latest blockhash
+      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
 
       // Create transaction
-      const transaction = new Transaction();
-      
-      // Add a recent blockhash before adding instructions
-      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-      transaction.recentBlockhash = latestBlockhash.blockhash;
-      transaction.feePayer = publicKey;
+      const transaction = new Transaction({
+        feePayer: publicKey,
+        recentBlockhash: latestBlockhash.blockhash
+      });
 
-      // Create mint account
+      // Add create mint account instruction
       transaction.add(
         SystemProgram.createAccount({
           fromPubkey: publicKey,
           newAccountPubkey: stablecoinMint.publicKey,
-          space: mintSpace,
+          space: MINT_SIZE,
           lamports: mintRent,
-          programId: TOKEN_PROGRAM_ID,
+          programId: TOKEN_PROGRAM_ID
         })
       );
 
-      // Log transaction details before sending
-      console.log('Transaction details:', {
-        instructions: transaction.instructions.length,
-        signers: [stablecoinMint.publicKey.toString(), stablecoinData.publicKey.toString()],
-        recentBlockhash: transaction.recentBlockhash,
-      });
-
-      // Verify wallet balance
-      const balance = await connection.getBalance(publicKey);
-      console.log('Wallet balance:', balance / LAMPORTS_PER_SOL, 'SOL');
-
-      if (balance < mintRent + dataRent + 5000) {
-        throw new Error('Insufficient SOL balance for transaction');
-      }
-
-      // Send transaction with explicit options
-      const signed = await wallet.wallet.adapter.sendTransaction(transaction, connection, {
-        signers: [stablecoinMint, stablecoinData],
-        preflightCommitment: 'confirmed',
-        skipPreflight: false, // Enable preflight checks
-      });
-
-      console.log('Transaction sent:', signed);
-
-      // Wait for confirmation with timeout
-      const confirmation = await Promise.race([
-        connection.confirmTransaction({
-          signature: signed,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
+      // Initialize mint instruction
+      transaction.add(
+        createInitializeMintInstruction(
+          stablecoinMint.publicKey,
+          6, // decimals
+          publicKey, // mint authority
+          publicKey  // freeze authority
         )
-      ]) as TransactionConfirmation;
+      );
 
-      // Check confirmation with proper type checking
-      if (confirmation && 
-          'value' in confirmation && 
-          confirmation.value && 
-          confirmation.value.err) {
-        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-      }
+      // Add create stablecoin instruction
+      const createStablecoinIx = await program.methods
+        .createStablecoin(
+          formData.name,
+          formData.symbol,
+          6, // decimals
+          formData.icon,
+          formData.currency
+        )
+        .accounts({
+          authority: publicKey,
+          stablecoinData: publicKey,
+          stablecoinMint: stablecoinMint.publicKey, // Use the new mint
+          bondMint: bondMintPubkey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .instruction();
+
+      transaction.add(createStablecoinIx);
+
+      console.log('Transaction setup:', {
+        feePayer: publicKey.toString(),
+        stablecoinMint: stablecoinMint.publicKey.toString(),
+        bondMint: bondMintPubkey.toString(),
+        instructions: transaction.instructions.length
+      });
+
+      // Send transaction
+      const signature = await wallet.sendTransaction(transaction, connection, {
+        signers: [stablecoinMint], // Include the new mint keypair
+        preflightCommitment: 'confirmed'
+      });
+
+      await connection.confirmTransaction({
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+      });
 
       toast.success('Stablecoin created successfully!');
 
-    } catch (err: unknown) {
-      const error = err as ExtendedError;
-      console.error('Detailed error:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name,
-        cause: error.cause?.message
-      });
-
-      // Handle specific error types
-      if (error.message.includes('insufficient balance')) {
-        toast.error('Insufficient SOL balance. Please add more SOL to your wallet.');
-      } else if (error.message.includes('timeout')) {
-        toast.error('Transaction timed out. Please try again.');
-      } else if (error.message.includes('blockhash')) {
-        toast.error('Network error. Please refresh and try again.');
-      } else {
-        toast.error(getErrorMessage(error));
-      }
+    } catch (error) {
+      console.error('Detailed error:', error);
+      toast.error(getErrorMessage(error));
     } finally {
       setLoading(false);
     }
