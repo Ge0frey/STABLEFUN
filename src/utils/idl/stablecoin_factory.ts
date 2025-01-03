@@ -11,9 +11,21 @@ export const IDL: Idl = {
         { name: "stablecoinData", isMut: true, isSigner: true },
         { name: "stablecoinMint", isMut: true, isSigner: true },
         { name: "bondMint", isMut: false, isSigner: false },
-        { name: "tokenProgram", isMut: false, isSigner: false },
-        { name: "systemProgram", isMut: false, isSigner: false },
-        { name: "rent", isMut: false, isSigner: false }
+        { 
+          name: "tokenProgram", 
+          isMut: false, 
+          isSigner: false
+        },
+        { 
+          name: "systemProgram", 
+          isMut: false, 
+          isSigner: false
+        },
+        { 
+          name: "rent", 
+          isMut: false, 
+          isSigner: false
+        }
       ],
       args: [
         { name: "name", type: "string" },
@@ -75,9 +87,18 @@ export const IDL: Idl = {
       code: 6000,
       name: "CalculationOverflow",
       msg: "Calculation overflow"
+    },
+    {
+      code: 6001,
+      name: "InvalidBondMint",
+      msg: "Invalid bond mint"
+    },
+    {
+      code: 6002,
+      name: "InvalidDecimals",
+      msg: "Invalid decimals"
     }
   ]
 };
 
-// Update the program class to use Program<Idl>
-export type StablecoinProgram = Program<Idl>;
+export type StablecoinProgram = Program<typeof IDL>;
