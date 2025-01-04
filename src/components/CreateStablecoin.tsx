@@ -192,161 +192,87 @@ export const CreateStablecoin = () => {
     try {
       setLoading(true);
 
-      // Debug: Check bond mint account first
-      const bondMintPubkey = new PublicKey(formData.bondMint);
-      const bondMintInfo = await connection.getAccountInfo(bondMintPubkey);
-      
-      // Add more detailed logging
-      console.log('Bond Mint Info:', {
-        exists: !!bondMintInfo,
-        owner: bondMintInfo?.owner.toString(),
-        data: bondMintInfo?.data.length,
-        bondMint: bondMintPubkey.toString()
-      });
-
-      // Check if account exists and is owned by the expected program
-      const EXPECTED_BOND_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
-      
-      if (!bondMintInfo) {
-        toast.error('Bond mint account not found');
-        return;
-      }
-
-      if (bondMintInfo.owner.toString() !== EXPECTED_BOND_PROGRAM_ID) {
-        console.error('Invalid bond mint owner:', {
-          expected: EXPECTED_BOND_PROGRAM_ID,
-          actual: bondMintInfo.owner.toString()
-        });
-        toast.error('Invalid bond mint account owner');
-        return;
-      }
-
-      // Create stablecoin data account
-      const stablecoinData = Keypair.generate();
-      const stablecoinDataRent = await connection.getMinimumBalanceForRentExemption(82); // Adjust size as needed
-
-      // Create stablecoin mint
+      // Create keypairs for the new accounts
       const stablecoinMint = Keypair.generate();
-      const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
+      const stablecoinData = Keypair.generate();
 
       // Get latest blockhash
-      const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+      const latestBlockhash = await connection.getLatestBlockhash();
 
       // Create transaction
       const transaction = new Transaction({
         feePayer: publicKey,
-        recentBlockhash: latestBlockhash.blockhash
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
       });
 
-      // 1. Create stablecoin data account
-      transaction.add(
-        SystemProgram.createAccount({
-          fromPubkey: publicKey,
-          newAccountPubkey: stablecoinData.publicKey,
-          space: 82, // Adjust size based on your program's needs
-          lamports: stablecoinDataRent,
-          programId: program.programId
-        })
-      );
+      // Get minimum rent for mint account
+      const mintRent = await getMinimumBalanceForRentExemptMint(connection);
 
-      // 2. Create stablecoin mint account
+      // Add instructions to transaction
       transaction.add(
+        // Create mint account
         SystemProgram.createAccount({
           fromPubkey: publicKey,
           newAccountPubkey: stablecoinMint.publicKey,
           space: MINT_SIZE,
           lamports: mintRent,
           programId: TOKEN_PROGRAM_ID
-        })
-      );
+        }),
 
-      // 3. Initialize stablecoin mint
-      transaction.add(
+        // Initialize mint
         createInitializeMintInstruction(
           stablecoinMint.publicKey,
           6, // decimals
-          publicKey, // mint authority
-          publicKey  // freeze authority
-        )
+          publicKey,
+          publicKey
+        ),
+
+        // Create stablecoin instruction
+        await program.methods
+          .createStablecoin(
+            formData.name,
+            formData.symbol,
+            6,
+            formData.icon || '',
+            formData.currency
+          )
+          .accounts({
+            authority: publicKey,
+            stablecoinData: stablecoinData.publicKey,
+            stablecoinMint: stablecoinMint.publicKey,
+            bondMint: new PublicKey(formData.bondMint),
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
+          })
+          .instruction()
       );
 
-      // 4. Add create stablecoin instruction
-      const createStablecoinIx = await program.methods
-        .createStablecoin(
-          formData.name,
-          formData.symbol,
-          6,
-          formData.icon,
-          formData.currency
-        )
-        .accounts({
-          authority: publicKey,
-          stablecoinData: stablecoinData.publicKey,
-          stablecoinMint: stablecoinMint.publicKey,
-          bondMint: bondMintPubkey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
-        })
-        .instruction();
-
-      transaction.add(createStablecoinIx);
-
-      console.log('Transaction setup:', {
-        feePayer: publicKey.toString(),
-        stablecoinData: stablecoinData.publicKey.toString(),
-        stablecoinMint: stablecoinMint.publicKey.toString(),
-        bondMint: bondMintPubkey.toString(),
-        instructions: transaction.instructions.length
-      });
-
-      // Try simulation first
-      try {
-        const simulation = await connection.simulateTransaction(transaction);
-        console.log('Simulation result:', {
-          err: simulation.value.err,
-          logs: simulation.value.logs,
-          unitsConsumed: simulation.value.unitsConsumed
-        });
-
-        if (simulation.value.err) {
-          throw new Error(`Simulation failed: ${JSON.stringify(simulation.value.err)}`);
-        }
-      } catch (simError) {
-        console.error('Simulation error:', simError);
-        toast.error('Transaction simulation failed');
-        return;
-      }
+      // Sign transaction with both keypairs
+      transaction.sign(stablecoinMint, stablecoinData);
 
       // Send transaction
       const signature = await wallet.sendTransaction(transaction, connection, {
-        signers: [stablecoinData, stablecoinMint],
-        preflightCommitment: 'confirmed'
+        signers: [stablecoinMint, stablecoinData]
       });
-
-      console.log('Transaction sent:', signature);
 
       // Wait for confirmation
       const confirmation = await connection.confirmTransaction({
         signature,
         blockhash: latestBlockhash.blockhash,
         lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-      }, 'confirmed');
+      });
 
       if (confirmation.value.err) {
         throw new Error(`Transaction failed: ${confirmation.value.err.toString()}`);
       }
 
-      toast.success(`Stablecoin created successfully! Signature: ${signature}`);
-
+      toast.success('Stablecoin created successfully!');
+      
     } catch (error: any) {
-      console.error('Detailed error:', {
-        error,
-        message: error.message,
-        logs: error.logs,
-        stack: error.stack
-      });
-      toast.error(getErrorMessage(error));
+      console.error('Error creating stablecoin:', error);
+      toast.error(error.message || 'Failed to create stablecoin');
     } finally {
       setLoading(false);
     }

@@ -12,6 +12,13 @@ export default defineConfig({
       http: 'http-browserify'
     }
   },
+  css: {
+    preprocessorOptions: {
+      css: {
+        charset: false
+      }
+    }
+  },
   optimizeDeps: {
     include: ['buffer', 'util']
   },
