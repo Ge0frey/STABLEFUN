@@ -44,8 +44,8 @@ stable.fun is a web3 application that enables users to create and manage their o
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/Ge0frey/stable.fun.git
-cd stable.fun
+git clone https://github.com/Ge0frey/stablefun.git
+cd stablefun
 ```
 
 2. Install dependencies:
@@ -144,5 +144,3 @@ This project is in beta. While we strive to ensure security, please use caution 
 - Anchor Framework
 - Switchboard Protocol
 ```
-
-This README provides a comprehensive overview of the project, including its features, technology stack, installation instructions, usage guidelines, and development information. It's structured to help both users and developers understand and work with the platform effectively.
