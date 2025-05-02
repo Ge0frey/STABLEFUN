@@ -1,5 +1,4 @@
 # Video demo preview - https://drive.google.com/file/d/1cpyCSXJBw_TW12Jf0NixtnYng22e7203/view?usp=sharing
-Youtube - https://youtu.be/O2PoOlDVgzo
 
 # stable.fun - Stablecoin Factory
 
